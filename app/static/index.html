@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arduino UNO Q Flasher</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-left">
+            <img
+                class="brand-logo"
+                src="/static/edge-impulse-logo.svg"
+                alt="Edge Impulse"
+            />
+            <div class="brand-divider"></div>
+            <h1>Arduino UNO Q Flasher<span class="subtitle">— bulk setup over ADB</span></h1>
+        </div>
+        <div id="health" class="health">checking...</div>
+    </header>
+
+    <section class="steps">
+        <div class="step" id="step-wifi" data-status="pending">
+            <div class="step-header">
+                <div class="step-number">1</div>
+                <div class="step-title">
+                    <div class="step-name">WiFi credentials</div>
+                    <div class="step-state" id="step-wifi-state">not configured</div>
+                </div>
+            </div>
+            <div class="step-body">
+                <label class="step-skip">
+                    <input type="checkbox" id="skip-step-wifi" />
+                    <span>Skip — keep existing WiFi & device password on board</span>
+                </label>
+                <div id="wifi-settings-form" class="inline-settings">
+                    <div class="inline-setting">
+                        <label for="setting-ssid">WiFi SSID</label>
+                        <input type="text" id="setting-ssid" placeholder="MyNetwork" />
+                    </div>
+                    <div class="inline-setting">
+                        <label for="setting-wifi-pw">WiFi password</label>
+                        <div class="pw-field">
+                            <input type="password" id="setting-wifi-pw" placeholder="••••••••" autocomplete="off" />
+                            <button
+                                type="button"
+                                class="pw-toggle"
+                                data-target="setting-wifi-pw"
+                                aria-label="Show WiFi password"
+                                title="Show / hide password"
+                            >
+                                <svg class="pw-icon pw-icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                                <svg class="pw-icon pw-icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a19.87 19.87 0 0 1 4.22-5.42"/>
+                                    <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a19.87 19.87 0 0 1-3.16 4.13"/>
+                                    <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/>
+                                    <line x1="1" y1="1" x2="23" y2="23"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="inline-setting">
+                        <span class="inline-setting-label">Is this network here now?</span>
+                        <div class="run-profile wifi-timing" role="radiogroup" aria-label="When to join this network">
+                            <label class="run-profile-option">
+                                <input type="radio" name="wifi-mode" id="wifi-mode-connect" value="connect" checked />
+                                <span class="run-profile-label">
+                                    <span class="run-profile-title">Yes — connect now</span>
+                                    <span class="run-profile-desc">Joins the network during the run, which proves the password works. Fails if the network isn't in range.</span>
+                                </span>
+                            </label>
+                            <label class="run-profile-option">
+                                <input type="radio" name="wifi-mode" id="wifi-mode-stage" value="stage" />
+                                <span class="run-profile-label">
+                                    <span class="run-profile-title">Not yet — save for later</span>
+                                    <span class="run-profile-desc">Saves the network on each board, which joins it automatically once it's in range. The password can't be checked until then.</span>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="inline-setting">
+                        <label for="setting-device-pw">Default device password <em>(optional)</em></label>
+                        <div class="pw-field">
+                            <input type="password" id="setting-device-pw" placeholder="••••••••" autocomplete="off" />
+                            <button
+                                type="button"
+                                class="pw-toggle"
+                                data-target="setting-device-pw"
+                                aria-label="Show device password"
+                                title="Show / hide password"
+                            >
+                                <svg class="pw-icon pw-icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                                <svg class="pw-icon pw-icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a19.87 19.87 0 0 1 4.22-5.42"/>
+                                    <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a19.87 19.87 0 0 1-3.16 4.13"/>
+                                    <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/>
+                                    <line x1="1" y1="1" x2="23" y2="23"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="inline-settings-actions">
+                        <button id="save-settings-btn" class="btn btn-primary btn-small">Save</button>
+                        <span id="settings-status" class="muted"></span>
+                    </div>
+                    <div id="env-file-path" class="env-file-path muted" hidden></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="step-arrow">→</div>
+
+        <div class="step" id="step-folder" data-status="optional">
+            <div class="step-header">
+                <div class="step-number">2</div>
+                <div class="step-title">
+                    <div class="step-name">App configuration <span class="step-name-suffix">(optional)</span></div>
+                    <div class="step-state" id="step-folder-state">none</div>
+                </div>
+            </div>
+            <div class="step-body">
+                <label class="step-skip">
+                    <input type="checkbox" id="skip-step-folder" />
+                    <span>Skip — keep existing apps on board</span>
+                </label>
+                <div id="folder-controls">
+                    <label class="file-picker">
+                        <input type="file" id="folder-input" webkitdirectory directory multiple />
+                        <span class="btn">Choose folder</span>
+                    </label>
+                    <div id="eim-info" class="eim-info" hidden>
+                        <div class="eim-info-header">.eim models</div>
+                        <ul id="eim-list"></ul>
+                    </div>
+                </div>
+                <label class="post-update-label">
+                    Post-update commands (one command per line, run in order)
+                    <textarea
+                        id="post-update-cmd"
+                        rows="5"
+                        placeholder="leave empty to skip"
+                    >arduino-app-cli app start user:workshop-racing-telemetry-unoq
+arduino-app-cli app stop user:workshop-racing-telemetry-unoq
+arduino-app-cli app start examples:inspirational/real-time-accelerometer
+arduino-app-cli app stop examples:inspirational/real-time-accelerometer</textarea>
+                </label>
+            </div>
+        </div>
+
+        <div class="step-arrow">→</div>
+
+        <div class="step" id="step-run" data-status="pending">
+            <div class="step-header">
+                <div class="step-number">3</div>
+                <div class="step-title">
+                    <div class="step-name">Run</div>
+                    <div class="step-state" id="step-run-state">0 boards ready</div>
+                </div>
+            </div>
+            <div class="step-body">
+                <div class="run-profile" role="radiogroup" aria-label="Run mode">
+                    <label class="run-profile-option">
+                        <input type="radio" name="run-profile" id="run-profile-full" value="full" checked />
+                        <span class="run-profile-label">
+                            <span class="run-profile-title">Full setup</span>
+                            <span class="run-profile-desc">WiFi, device password, app, apt maintenance, system update, board name. Takes minutes per board.</span>
+                        </span>
+                    </label>
+                    <label class="run-profile-option">
+                        <input type="radio" name="run-profile" id="run-profile-wifi" value="wifi" />
+                        <span class="run-profile-label">
+                            <span class="run-profile-title">WiFi only</span>
+                            <span class="run-profile-desc">Sets the WiFi SSID and password and nothing else. Needs no sudo, so it works on a fresh board whose password is still expired. Seconds per board.</span>
+                        </span>
+                    </label>
+                </div>
+                <div class="run-mode" role="group" aria-label="Steps to run">
+                    <label class="run-mode-option">
+                        <input type="checkbox" id="run-step-wifi" checked />
+                        <span class="run-mode-label">
+                            <span class="run-mode-title">Step 1: Configure WiFi + device password</span>
+                            <span class="run-mode-desc">Runs push_env + change_password.</span>
+                        </span>
+                    </label>
+                    <label class="run-mode-option">
+                        <input type="checkbox" id="run-step-app" checked />
+                        <span class="run-mode-label">
+                            <span class="run-mode-title">Step 2: Push app folder + properties</span>
+                            <span class="run-mode-desc">Requires a selected upload folder unless Step 2 card is skipped.</span>
+                        </span>
+                    </label>
+                    <label class="run-mode-option">
+                        <input type="checkbox" id="run-step-setup" checked />
+                        <span class="run-mode-label">
+                            <span class="run-mode-title">Step 3: Run setup script</span>
+                            <span class="run-mode-desc">Includes WiFi validation + arduino-app-cli system update.</span>
+                        </span>
+                    </label>
+                    <label class="run-mode-option">
+                        <input type="checkbox" id="run-step-prune" />
+                        <span class="run-mode-label">
+                            <span class="run-mode-title">Step 4: Prune old Docker images</span>
+                            <span class="run-mode-desc">Deletes all Docker images; App Lab re-downloads them when an app next runs. Unticked, images are only removed if a board has under 1 GB free.</span>
+                        </span>
+                    </label>
+                    <label class="run-mode-option">
+                        <input type="checkbox" id="run-step-post-update" checked />
+                        <span class="run-mode-label">
+                            <span class="run-mode-title">Step 5: Run post-update command</span>
+                            <span class="run-mode-desc">Uses the command configured in Step 2.</span>
+                        </span>
+                    </label>
+                </div>
+                <div class="step-actions">
+                    <button id="run-btn" class="btn btn-primary" disabled>Run selected steps on all boards</button>
+                </div>
+                <div class="step-actions">
+                    <button id="refresh-btn" class="btn btn-ghost btn-small">⟳ Refresh devices</button>
+                    <button id="wifi-check-all-btn" class="btn btn-ghost btn-small">Check WiFi on all boards</button>
+                </div>
+                <div id="run-status" class="muted"></div>
+            </div>
+        </div>
+    </section>
+
+    <main id="devices-grid" class="devices-grid"></main>
+
+    <template id="device-card-template">
+        <div class="device-card" data-serial="">
+            <div class="device-header">
+                <div class="device-title">
+                    <span class="device-serial"></span>
+                    <span class="status-badge" data-status="idle">idle</span>
+                    <span class="elapsed" hidden></span>
+                </div>
+                <div class="device-actions">
+                    <span class="wifi-badge" data-status="unknown" title="No WiFi check yet">WiFi ?</span>
+                    <button class="btn btn-small identify-btn" title="Blink the red LED to find this board on the bench">Identify</button>
+                    <button class="btn btn-small wifi-check-btn" title="Run quick WiFi and internet connectivity checks">WiFi Check</button>
+                    <button class="btn btn-small retry-btn" hidden>Retry</button>
+                </div>
+            </div>
+            <div class="progress-row">
+                <div class="progress-bar"><div class="progress-fill"></div></div>
+                <span class="current-stage">—</span>
+            </div>
+            <div class="skip-row">
+                <label><input type="checkbox" class="skip-toggle" data-stage="change_password" /> skip password</label>
+                <label><input type="checkbox" class="skip-toggle" data-stage="push_properties" /> skip properties</label>
+                <label><input type="checkbox" class="skip-toggle" data-stage="post_update" /> skip post-update</label>
+            </div>
+            <div class="failure-reason" hidden></div>
+            <div class="summary-panel" hidden>
+                <div class="summary-header">Update summary</div>
+                <div class="summary-row"><span class="label">Overall</span><span class="summary-overall"></span></div>
+                <div class="summary-row"><span class="label">Phase</span><span class="summary-phase"></span></div>
+                <div class="summary-row"><span class="label">Setup</span><span class="summary-status"></span></div>
+                <div class="summary-row"><span class="label">Setup time</span><span class="summary-time"></span></div>
+                <div class="summary-row"><span class="label">Post-update</span><span class="summary-post-update"></span></div>
+                <ul class="summary-warnings"></ul>
+                <ul class="summary-errors"></ul>
+            </div>
+            <pre class="log-panel"></pre>
+        </div>
+    </template>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
