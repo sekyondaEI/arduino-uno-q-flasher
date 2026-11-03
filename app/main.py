@@ -17,8 +17,10 @@ import hashlib
 import json
 import os
 import platform
+import plistlib
 import re
 import shutil
+import signal
 import sys
 import time
 from urllib.parse import urlparse
@@ -211,13 +213,43 @@ def _flasher_path() -> str | None:
     return shutil.which("arduino-flasher-cli")
 
 
-async def _edl_device_count() -> int:
-    if sys.platform == "darwin":
-        command = ["system_profiler", "SPUSBDataType", "-json", "-detailLevel", "mini"]
-    elif sys.platform.startswith("linux"):
-        command = ["lsusb"]
-    else:
-        return 0
+EDL_VENDOR_ID = 0x05C6
+EDL_PRODUCT_ID = 0x9008
+
+
+def _parse_usb_id(value: object) -> int | None:
+    """Accept 1478, "0x05c6", or "0x05c6  (Qualcomm, Inc.)" style values."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    match = re.search(r"0x([0-9a-f]{1,4})", str(value), re.IGNORECASE)
+    return int(match.group(1), 16) if match else None
+
+
+def _count_edl_in_tree(value: object) -> int:
+    """Walk system_profiler / ioreg data and count Qualcomm 05c6:9008 devices.
+
+    Key names differ by macOS version: SPUSBDataType uses vendor_id/product_id,
+    SPUSBHostDataType (macOS 26+) uses USBDeviceKeyVendorID/USBDeviceKeyProductID,
+    and ioreg uses idVendor/idProduct.
+    """
+    if isinstance(value, dict):
+        vendor = product = None
+        for key, item in value.items():
+            name = str(key).lower()
+            if re.search(r"vendor_?id$", name) or name == "idvendor":
+                vendor = _parse_usb_id(item)
+            elif re.search(r"product_?id$", name) or name == "idproduct":
+                product = _parse_usb_id(item)
+        own_match = int(vendor == EDL_VENDOR_ID and product == EDL_PRODUCT_ID)
+        return own_match + sum(_count_edl_in_tree(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_count_edl_in_tree(item) for item in value)
+    return 0
+
+
+async def _run_capture(command: list[str]) -> bytes | None:
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -226,26 +258,41 @@ async def _edl_device_count() -> int:
         )
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=15)
     except (OSError, asyncio.TimeoutError):
+        return None
+    return stdout
+
+
+async def _edl_device_count() -> int:
+    if sys.platform.startswith("linux"):
+        stdout = await _run_capture(["lsusb"])
+        if stdout is None:
+            return 0
+        output = stdout.decode("utf-8", errors="replace")
+        return sum("05c6:9008" in line.lower() for line in output.splitlines())
+    if sys.platform != "darwin":
         return 0
-    output = stdout.decode("utf-8", errors="replace")
-    if sys.platform == "darwin":
-        try:
-            usb_data = json.loads(output)
-        except json.JSONDecodeError:
-            return 0
 
-        def count_edl_devices(value: object) -> int:
-            if isinstance(value, dict):
-                vendor = str(value.get("vendor_id", "")).lower()
-                product = str(value.get("product_id", "")).lower()
-                own_match = int("0x05c6" in vendor and "0x9008" in product)
-                return own_match + sum(count_edl_devices(item) for item in value.values())
-            if isinstance(value, list):
-                return sum(count_edl_devices(item) for item in value)
-            return 0
-
-        return count_edl_devices(usb_data)
-    return sum("05c6:9008" in line.lower() for line in output.splitlines())
+    # Newer macOS releases return an empty SPUSBDataType and report USB devices
+    # under SPUSBHostDataType instead, so check both, then fall back to ioreg.
+    # Each source sees the same physical devices, so take the max, not the sum.
+    counts = [0]
+    for data_type in ("SPUSBHostDataType", "SPUSBDataType"):
+        stdout = await _run_capture(
+            ["system_profiler", data_type, "-json", "-detailLevel", "mini"]
+        )
+        if stdout:
+            try:
+                counts.append(_count_edl_in_tree(json.loads(stdout)))
+            except json.JSONDecodeError:
+                pass
+    if max(counts) == 0:
+        stdout = await _run_capture(["ioreg", "-a", "-r", "-c", "IOUSBHostDevice", "-l"])
+        if stdout:
+            try:
+                counts.append(_count_edl_in_tree(plistlib.loads(stdout)))
+            except Exception:
+                pass
+    return max(counts)
 
 
 async def _run_image_flash(preserve_user: bool) -> None:
@@ -294,7 +341,7 @@ async def _run_image_flash(preserve_user: bool) -> None:
             command.append("--preserve-user")
         flash_state["logs"].append("Starting official Arduino Flasher CLI...")
         exit_code = await asyncio.wait_for(
-            _stream_flasher(*command),
+            _stream_flasher(*command, gate_board_reset=True),
             timeout=FLASH_PROCESS_TIMEOUT_SECONDS,
         )
         flash_state["exit_code"] = exit_code
@@ -310,7 +357,130 @@ async def _run_image_flash(preserve_user: bool) -> None:
         flash_state["exit_code"] = -1
 
 
-async def _stream_flasher(*command: str) -> int:
+# --- Board-restart gate between the flasher's two qdl runs -------------------
+#
+# arduino-flasher-cli runs qdl twice: first to read the board's partition table,
+# then to flash. The first run ends by resetting the board, which (with the EDL
+# jumper still on) comes back in EDL with a fresh Sahara "hello". The flasher
+# starts the second qdl immediately, and qdl v2.4 waits only 1 s for that hello
+# with no retry. If the second qdl attaches before the board has actually
+# dropped off USB, it reads nothing and fails with
+# "failed to read sahara request from device".
+#
+# To avoid that race, pause the flasher (SIGSTOP) while the first qdl runs,
+# wait for that qdl to finish and the board to re-enumerate in EDL, then resume
+# it (SIGCONT). Stopping the parent does not stop qdl itself.
+
+GATE_FIRST_QDL_TIMEOUT = 30 * 60   # image extraction happens before the first qdl
+GATE_QDL_EXIT_TIMEOUT = 3 * 60
+GATE_RECONNECT_TIMEOUT = 30
+GATE_MANUAL_REPLUG_TIMEOUT = 5 * 60
+GATE_SETTLE_SECONDS = 2
+
+
+async def _child_pids(parent_pid: int, name: str) -> list[int]:
+    stdout = await _run_capture(["pgrep", "-P", str(parent_pid), name])
+    if not stdout:
+        return []
+    return [int(tok) for tok in stdout.split() if tok.isdigit()]
+
+
+async def _process_finished(pid: int) -> bool:
+    """True once pid is gone or a zombie waiting for its (stopped) parent."""
+    stdout = await _run_capture(["ps", "-o", "stat=", "-p", str(pid)])
+    state = (stdout or b"").decode(errors="replace").strip()
+    return not state or state.startswith("Z")
+
+
+async def _wait_for_edl_count(predicate, timeout: float, interval: float = 0.5) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate(await _edl_device_count()):
+            return True
+        await asyncio.sleep(interval)
+    return False
+
+
+def _gate_log(message: str) -> None:
+    flash_state["logs"].append(message)
+    flash_state["logs"] = flash_state["logs"][-500:]
+
+
+async def _gate_second_qdl(process: asyncio.subprocess.Process, state: dict) -> None:
+    pid = process.pid
+
+    # 1. Catch the first qdl run (the partition-table read).
+    deadline = time.monotonic() + GATE_FIRST_QDL_TIMEOUT
+    first_qdl: list[int] = []
+    while process.returncode is None and time.monotonic() < deadline:
+        first_qdl = await _child_pids(pid, "qdl")
+        if first_qdl:
+            break
+        await asyncio.sleep(0.05)
+    if not first_qdl or process.returncode is not None:
+        return
+
+    os.kill(pid, signal.SIGSTOP)
+    state["stopped"] = True
+    _gate_log("Reading the board's partition table; flasher paused until the board restarts...")
+
+    try:
+        # 2. Let the first qdl finish. It resets the board on the way out.
+        deadline = time.monotonic() + GATE_QDL_EXIT_TIMEOUT
+        while time.monotonic() < deadline:
+            if all([await _process_finished(q) for q in first_qdl]):
+                break
+            await asyncio.sleep(0.2)
+
+        # 3. Wait for the board to drop off USB and come back in EDL. The reset
+        # can be too quick for system_profiler to catch the "gone" moment, so a
+        # missed disappearance is fine as long as the board is present after.
+        await _wait_for_edl_count(lambda n: n == 0, timeout=10)
+        await asyncio.sleep(GATE_SETTLE_SECONDS)
+        back = await _wait_for_edl_count(lambda n: n == 1, timeout=GATE_RECONNECT_TIMEOUT)
+
+        if not back:
+            _gate_log(
+                "Board did not come back in EDL mode. Unplug USB-C, keep the EDL "
+                "jumper on, and plug it back in."
+            )
+            back = await _wait_for_edl_count(
+                lambda n: n == 1, timeout=GATE_MANUAL_REPLUG_TIMEOUT
+            )
+            if not back:
+                _gate_log("Timed out waiting for the board to reconnect in EDL mode.")
+            else:
+                await asyncio.sleep(GATE_SETTLE_SECONDS)
+
+        if back:
+            _gate_log("Board is back in EDL mode; continuing with the flash.")
+    finally:
+        # Always resume, even if this task is cancelled, so the flasher is never
+        # left frozen. If the board never came back, qdl will fail and report it.
+        if process.returncode is None:
+            os.kill(pid, signal.SIGCONT)
+        state["stopped"] = False
+
+
+def _append_flash_log(text: str, progress: bool, replace_last: bool) -> None:
+    logs = flash_state["logs"]
+    if replace_last and logs:
+        logs[-1] = text
+    else:
+        logs.append(text)
+    flash_state["logs"] = logs[-500:]
+
+
+async def _stream_flasher(*command: str, gate_board_reset: bool = False) -> int:
+    """Stream the flasher's output into the UI log.
+
+    The flasher draws progress bars by rewriting one line with carriage
+    returns (\r) and no newline. StreamReader.readline() only splits on \n,
+    so during a 1 GB download that "line" grows past asyncio's 64 KiB limit
+    and raises "Separator is not found, and chunk exceed the limit". Read raw
+    chunks instead, split on both \r and \n, and let each progress update
+    overwrite the previous one rather than flooding the log.
+    """
     global flash_process
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -318,22 +488,50 @@ async def _stream_flasher(*command: str) -> int:
         stderr=asyncio.subprocess.STDOUT,
     )
     flash_process = process
+    buffer = ""
+    last_was_progress = False
+    gate_state = {"stopped": False}
+    gate_task = (
+        asyncio.create_task(_gate_second_qdl(process, gate_state))
+        if gate_board_reset and sys.platform != "win32"
+        else None
+    )
     try:
         assert process.stdout is not None
-        while line := await process.stdout.readline():
-            flash_state["logs"].append(line.decode("utf-8", errors="replace").rstrip())
-            flash_state["logs"] = flash_state["logs"][-500:]
+        while chunk := await process.stdout.read(65536):
+            buffer += chunk.decode("utf-8", errors="replace")
+            parts = re.split(r"(\r\n|\r|\n)", buffer)
+            buffer = parts.pop()  # unterminated tail, kept for the next chunk
+            for text, sep in zip(parts[0::2], parts[1::2]):
+                text = text.rstrip()
+                if not text:
+                    continue
+                is_progress = sep == "\r"
+                _append_flash_log(text, is_progress, replace_last=last_was_progress)
+                last_was_progress = is_progress
+            if len(buffer) > 65536:  # never let one unterminated line grow unbounded
+                buffer = buffer[-4096:]
+        if buffer.strip():
+            _append_flash_log(buffer.rstrip(), False, replace_last=last_was_progress)
         return await process.wait()
-    except asyncio.CancelledError:
+    finally:
+        if gate_task is not None and not gate_task.done():
+            gate_task.cancel()
+            try:
+                await gate_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        # Stop the flasher on cancel *or* any error, so it is never left
+        # running in the background holding the board or the download.
         if process.returncode is None:
+            if gate_state["stopped"]:
+                os.kill(process.pid, signal.SIGCONT)  # a stopped process ignores SIGTERM
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
-        raise
-    finally:
         flash_process = None
 
 
